@@ -22,7 +22,13 @@ class MainRecommender:
     def __init__(self, data, weighting=True, filter_it=-9):
         # your_code. Это не обязательная часть. Но если вам удобно что-либо посчитать тут - можно это сделать
         self.filter_it = filter_it
+        self.data_frame = data
 
+        # Топ покупок по всему датасету
+        self.overall_top_purchases = data.groupby('item_id')['quantity'].count().reset_index()
+        self.overall_top_purchases.sort_values('quantity', ascending=False, inplace=True)
+        self.overall_top_purchases = self.overall_top_purchases[self.overall_top_purchases['item_id'] != 999999]
+        self.overall_top_purchases = self.overall_top_purchases.item_id.tolist()
 
         self.user_item_matrix = self.prepare_matrix(data)  # pd.DataFrame
         self.id_to_itemid, self.id_to_userid, \
@@ -98,33 +104,54 @@ class MainRecommender:
             rec = self.id_to_itemid[recs[2][0]]
         return rec
 
+    def _update_dict(self, user_id):
+        """Если появился новыю user / item, то нужно обновить словари"""
+
+        if user_id not in self.userid_to_id.keys():
+
+            print(user_id)
+            max_id = max(list(self.userid_to_id.values()))
+            max_id += 1
+
+            self.userid_to_id.update({user_id: max_id})
+            self.id_to_userid.update({max_id: user_id})
+
+    def _extend_with_top_popular(self, recommendations, N=5):
+        """Если кол-во рекоммендаций < N, то дополняем их топ-популярными"""
+
+        if len(recommendations) < N:
+            recommendations.extend(self.overall_top_purchases[:N])
+            recommendations = recommendations[:N]
+
+        return recommendations
+
     # your_code
     def get_recommendation(self, user, N=5, similar_users=False):
         """Рекомендуем товары"""
 
         # your_code
-        sparse_user_item = csr_matrix(self.user_item_matrix).tocsr()
-
         model = self.model
         if similar_users:
             model = self.own_recommender
 
+        self._update_dict(user_id=user)
         res = [self.id_to_itemid[rec[0]] for rec in
                model.recommend(userid=self.userid_to_id[user],
-                               user_items=sparse_user_item,  # на вход user-item matrix
+                               user_items=csr_matrix(self.user_item_matrix).tocsr(),  # на вход user-item matrix
                                N=N,
                                filter_already_liked_items=False,
                                filter_items=[self.itemid_to_id[self.filter_it]],
                                recalculate_user=True)]
 
-        #assert len(res) == N, 'Количество рекомендаций != {}'.format(N)
+        res = self._extend_with_top_popular(res, N=N)
+        assert len(res) == N, 'Количество рекомендаций != {}'.format(N)
         return res
 
-    def get_similar_items_recommendation(self, data, user, N=5):
+    def get_similar_items_recommendation(self, user, N=5):
         """Рекомендуем товары, похожие на топ-N купленных юзером товаров"""
 
         # your_code
-        popularity = data[data.user_id == user].groupby(['item_id'])['quantity'].count().reset_index()
+        popularity = self.data_frame[self.data_frame.user_id == user].groupby(['item_id'])['quantity'].count().reset_index()
         popularity.sort_values('quantity', ascending=False, inplace=True)
         popularity = popularity[popularity['item_id'] != self.filter_it]
         popularity = popularity.head(N)
@@ -132,15 +159,22 @@ class MainRecommender:
         goods = popularity.item_id.to_list()
         res = list(map(lambda x: self.get_rec(x), goods))
 
-        #assert len(res) == N, 'Количество рекомендаций != {}'.format(user)
+        res = self._extend_with_top_popular(res, N=N)
+        assert len(res) == N, 'Количество рекомендаций != {}'.format(user)
         return res
 
     def get_similar_users_recommendation(self, user, N=5):
         """Рекомендуем топ-N товаров, среди купленных похожими юзерами"""
 
+        res = []
     # your_code
-        sim_user = self.model.similar_users(self.userid_to_id[user], N=2)[1][0]
-        res = self.get_recommendation(sim_user, N=5, similar_users=True)
+        sim_user = self.model.similar_users(self.userid_to_id[user], N=N+1)
+        similar_users = [rec[0] for rec in sim_user]
+        similar_users = similar_users[1:]   # удалим юзера из запроса
 
-        #assert len(res) == N, 'Количество рекомендаций != {}'.format(N)
+        for user in similar_users:
+            res.extend(self.get_recommendation(user, N=1, similar_users=True))
+
+        res = self._extend_with_top_popular(res, N=N)
+        assert len(res) == N, 'Количество рекомендаций != {}'.format(N)
         return res
